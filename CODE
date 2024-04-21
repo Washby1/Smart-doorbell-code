@@ -1,0 +1,125 @@
+from flask import Flask, render_template, Response
+import cv2
+import numpy as np
+import time
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.image import MIMEImage
+
+app = Flask(__name__)
+
+# Global variables for motion detection
+background = None
+motion_detected = False
+last_email_time = 0
+email_batch = []
+
+# Function to initialize background model
+def initialize_background(frame):
+    global background
+    background = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    background = cv2.GaussianBlur(background, (21, 21), 0)
+
+# Function to detect motion using background subtraction
+def detect_motion(frame):
+    global background, motion_detected
+    motion_detected = False
+
+    # Convert frame to grayscale and blur it
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    gray = cv2.GaussianBlur(gray, (21, 21), 0)
+
+    # Compute absolute difference between current frame and background
+    frame_delta = cv2.absdiff(background, gray)
+    thresh = cv2.threshold(frame_delta, 25, 255, cv2.THRESH_BINARY)[1]
+
+    # Dilate the thresholded image to fill in holes, then find contours
+    thresh = cv2.dilate(thresh, None, iterations=2)
+    contours, _ = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    # Check if motion is detected
+    for contour in contours:
+        if cv2.contourArea(contour) > 500:
+            motion_detected = True
+            break
+
+# Function to send email notification
+def send_email_notification(frame):
+    global last_email_time, email_batch
+    current_time = time.time()
+
+    # Add motion detection event to email batch
+    email_batch.append(current_time)
+
+    # Send email if 30 seconds have elapsed since the last email
+    if current_time - last_email_time >= 30 and email_batch:
+        sender_email = 'wesley.ashby5@gmail.com'
+        receiver_email = 'wesley.ashby5@gmail.com'
+        password = 'wagv yrhc radp krlu'
+
+        message = MIMEMultipart()
+        message['From'] = sender_email
+        message['To'] = receiver_email
+        message['Subject'] = 'Motion Detected'
+
+        body = 'Motion has been detected in the video stream.'
+        message.attach(MIMEText(body, 'plain'))
+
+        # Attach images of motion detection events
+        for i, event_time in enumerate(email_batch):
+            filename = f'motion_event_{i}.jpg'
+            cv2.imwrite(filename, frame)
+            with open(filename, 'rb') as attachment:
+                img_part = MIMEImage(attachment.read())
+                img_part.add_header('Content-Disposition', f'attachment; filename= {filename}')
+                message.attach(img_part)
+
+        # Send email
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        server.login(sender_email, password)
+        text = message.as_string()
+        server.sendmail(sender_email, receiver_email, text)
+        server.quit()
+
+        # Update last email time and reset email batch
+        last_email_time = current_time
+        email_batch = []
+
+# Function to read video frames
+def read_frames():
+    camera = cv2.VideoCapture(-1)
+    _, first_frame = camera.read()
+    initialize_background(first_frame)
+
+    while True:
+        _, frame = camera.read()
+
+        # Perform motion detection
+        detect_motion(frame)
+
+        # If motion is detected, send email notification
+        if motion_detected:
+            send_email_notification(frame)
+
+        # Update background model periodically
+        if time.time() % 60 == 0:  # Update background every 60 seconds
+            initialize_background(frame)
+
+        # Encode frame to JPEG format
+        ret, buffer = cv2.imencode('.jpg', frame)
+        frame = buffer.tobytes()
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@app.route('/video_feed')
+def video_feed():
+    return Response(read_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+if __name__ == '__main__':
+    app.run(host='172.20.10.11', port=5000, debug=True)
